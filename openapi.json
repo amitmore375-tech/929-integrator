@@ -1,0 +1,83 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "929 Integrator API (Token-Protected)",
+    "version": "1.1.0",
+    "description": "Render 929 SPA pages and extract readable text + fetch YouTube transcripts. Protected by x-api-token."
+  },
+  "servers": [
+    {
+      "url": "https://<YOUR-VERCEL-APP>.vercel.app"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-token"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "paths": {
+    "/api/scrape929": {
+      "get": {
+        "operationId": "scrape929",
+        "summary": "Render and extract 929 page text",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "929 or edu.929 URL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/ytTranscript": {
+      "get": {
+        "operationId": "ytTranscript",
+        "summary": "Fetch YouTube transcript",
+        "parameters": [
+          {
+            "name": "v",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "YouTube video ID"
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "he"
+            },
+            "description": "Preferred language code"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}
