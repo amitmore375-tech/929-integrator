@@ -5,7 +5,11 @@ export default async function handler(req, res) {
   try {
     // --- Simple header-based auth ---
    const expected = process.env.TOKEN;
-const provided = req.headers['x-api-token'] || req.query.token; // ← גם דרך query
+// אימות: כותרת x-api-token או פרמטר ?token=
+// קודם מנסה INTEGRATOR_TOKEN, ואם לא קיים נופל חזרה ל-TOKEN
+const expected = process.env.INTEGRATOR_TOKEN || process.env.TOKEN;
+const provided = req.headers['x-api-token'] || req.query.token;
+
 if (!expected || !provided || provided !== expected) {
   return res.status(401).json({ ok: false, error: 'unauthorized: missing/invalid token' });
 }
