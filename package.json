@@ -7,7 +7,20 @@
     "playwright": "^1.46.0",
     "jsdom": "^24.0.0",
     "@mozilla/readability": "^0.5.0",
-    "youtube-transcript": "^1.2.2",
+   {
+  "name": "929-integrator-token",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jsdom": "^24.0.0",
+    "@mozilla/readability": "^0.5.0",
+    "youtube-transcript": "^1.2.1",
+    "cors": "^2.8.5",
+    "playwright": "^1.46.0"
+  }
+}
+
     "cors": "^2.8.5"
   }
 }
