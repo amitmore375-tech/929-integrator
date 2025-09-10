@@ -6,11 +6,12 @@ import { Readability } from '@mozilla/readability';
 export default async function handler(req, res) {
   try {
     // --- Simple header-based auth ---
-    const tokenHeader = req.headers['x-api-token'];
-    const expected = process.env.TOKEN;
-    if (!expected || !tokenHeader || tokenHeader !== expected) {
-      return res.status(401).json({ ok: false, error: 'unauthorized: missing/invalid x-api-token' });
-    }
+   const expected = process.env.TOKEN;
+const provided = req.headers['x-api-token'] || req.query.token; // ← גם דרך query
+if (!expected || !provided || provided !== expected) {
+  return res.status(401).json({ ok: false, error: 'unauthorized: missing/invalid token' });
+}
+
 
     const url = req.query.url;
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
