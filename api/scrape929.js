@@ -1,15 +1,7 @@
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 
-// מזהה אם ה-HTML שקיבלנו כנראה "ריק" (SPA)
-function looksEmptyHTML(html) {
-  if (!html) return true;
-  if (html.length < 2000) return true;
-  if (/You need to enable JavaScript to run this app\./i.test(html)) return true;
-  return false;
-}
-
-// בונה כתובת רינדור-שרת ל-https דרך r.jina.ai
+// בניית כתובת רינדור-שרת ל-https דרך r.jina.ai
 function jinaUrl(orig) {
   const u = new URL(orig);
   const scheme = u.protocol.replace(":", ""); // 'https' או 'http'
@@ -31,7 +23,26 @@ async function fetchHtml(url) {
   return await resp.text();
 }
 
-// חילוץ קישורים מ-HTML רגיל
+function parseWithReadability(html, baseUrl) {
+  const dom = new JSDOM(html, { url: baseUrl });
+  const doc = dom.window.document;
+  const pageTitle = (doc.querySelector("title")?.textContent || "").trim();
+  let title = pageTitle || null;
+  let text = (doc.body?.textContent || "").trim();
+
+  try {
+    const reader = new Readability(doc);
+    const parsed = reader.parse();
+    if (parsed) {
+      title = parsed.title || title;
+      if (parsed.textContent && parsed.textContent.trim()) {
+        text = parsed.textContent.trim();
+      }
+    }
+  } catch {}
+  return { title, text, doc };
+}
+
 function linksFromHTML(doc, baseUrl, allow) {
   const set = new Set();
   for (const a of doc.querySelectorAll("a[href]")) {
@@ -43,14 +54,14 @@ function linksFromHTML(doc, baseUrl, allow) {
   return Array.from(set);
 }
 
-// חילוץ קישורים מתוך טקסט (למשל מה-fallback של jina)
 function linksFromText(text, allow) {
   const set = new Set();
   const re = /https?:\/\/[^\s)\]]+/g;
   for (const m of text.matchAll(re)) {
     const href = m[0];
     try {
-      if (allow.some((r) => r.test(href))) set.add(new URL(href).toString());
+      const norm = new URL(href).toString();
+      if (allow.some((r) => r.test(norm))) set.add(norm);
     } catch {}
   }
   return Array.from(set);
@@ -75,100 +86,64 @@ export default async function handler(req, res) {
       /^https?:\/\/(www\.)?929\.org\.il\//,
       /^https?:\/\/(edu\.)?929\.org\.il\//,
     ];
-
     if (!allow.some((r) => r.test(url))) {
       return res.status(400).json({ ok: false, error: "url not allowed", url });
     }
 
-    // ---- ניסיון 1: HTML ישיר ----
-    let html = await fetchHtml(url);
-    let usedFallback = false;
+    // --- נביא גם מקור וגם פולבק, ונבחר את העשיר יותר ---
+    let htmlOriginal = "";
+    let htmlFallbackWrapped = "";
+    let fallbackText = "";
+    let fallbackOk = false;
 
-    // ננסה לקרוא עם Readability
-    let article = null;
-    let pageTitle = "";
-    {
-      const dom = new JSDOM(html, { url });
-      const doc = dom.window.document;
-      pageTitle = (doc.querySelector("title")?.textContent || "").trim();
-      try {
-        const reader = new Readability(doc);
-        const parsed = reader.parse();
-        if (parsed) {
-          article = {
-            title: parsed.title || pageTitle || null,
-            text: (parsed.textContent || "").trim() || null,
-          };
-        }
-      } catch {}
-      if (!article) {
-        const txt = (doc.body?.textContent || "").trim();
-        article = { title: pageTitle || null, text: txt || null };
-      }
-    }
+    // 1) מקור
+    try { htmlOriginal = await fetchHtml(url); } catch (e) { htmlOriginal = ""; }
 
-    // אם ה-HTML “ריק” או שהטקסט קצר מדי → פולבק ל-jina
-    if (looksEmptyHTML(html) || !article?.text || article.text.length < 300) {
+    // 2) פולבק (רינדור-שרת)
+    try {
       const jr = await fetch(jinaUrl(url));
       if (jr.ok) {
-        const fallbackText = await jr.text(); // טקסט מרונדר
-        // עוטפים כ-HTML כדי לאפשר Readability, וגם נשמור את הטקסט הגולמי
+        fallbackText = await jr.text(); // טקסט/מרק-דאון
         const safe = fallbackText
           .replaceAll("&", "&amp;")
           .replaceAll("<", "&lt;")
           .replaceAll(">", "&gt;");
-        html = `<article>${safe}</article>`;
-        usedFallback = true;
-
-        const dom2 = new JSDOM(html, { url });
-        const doc2 = dom2.window.document;
-        const pageTitle2 = (doc2.querySelector("title")?.textContent || "").trim();
-        let parsed2 = null;
-        try {
-          const reader2 = new Readability(doc2);
-          parsed2 = reader2.parse();
-        } catch {}
-        if (parsed2) {
-          article = {
-            title: parsed2.title || pageTitle2 || pageTitle || null,
-            text: (parsed2.textContent || "").trim() || null,
-          };
-        } else {
-          const txt2 = (doc2.body?.textContent || "").trim();
-          article = { title: pageTitle2 || pageTitle || null, text: txt2 || null };
-        }
-
-        // קישורים גם מתוך הטקסט של הפולבק
-        const extraFromText = linksFromText(fallbackText, allow);
-        // נאחד עם מה שיוצא מ-HTML (ייתכן ריק)
-        const doc2Links = linksFromHTML(doc2, url, allow);
-        const merged = Array.from(new Set([...doc2Links, ...extraFromText]));
-        return res.status(200).json({
-          ok: true,
-          url,
-          title: article.title || pageTitle,
-          article,
-          links: merged.slice(0, 200).map((href) => ({ href, text: "" })),
-          usedFallback: true,
-        });
+        htmlFallbackWrapped = `<article>${safe}</article>`;
+        fallbackOk = true;
       }
-    }
+    } catch {}
 
-    // אם לא נכנסנו לפולבק – נחזיר את מה שיש מה-HTML
-    const dom = new JSDOM(html, { url });
-    const doc = dom.window.document;
-    const links = linksFromHTML(doc, url, allow);
+    // פרסינג לשני המקורות
+    const parsedOrig = parseWithReadability(htmlOriginal, url);
+    const parsedFB = htmlFallbackWrapped
+      ? parseWithReadability(htmlFallbackWrapped, url)
+      : { title: null, text: "" , doc: new JSDOM("<div/>").window.document };
+
+    const lenOrig = (parsedOrig.text || "").length;
+    const lenFB   = (parsedFB.text  || "").length;
+
+    // בוחרים את העשיר יותר
+    const useFallback = fallbackOk && lenFB > Math.max(lenOrig, 250);
+    const chosen = useFallback ? parsedFB : parsedOrig;
+
+    // קישורים
+    const linksHTML = linksFromHTML(useFallback ? parsedFB.doc : parsedOrig.doc, url, allow);
+    const linksFB   = useFallback ? linksFromText(fallbackText, allow) : [];
+    const mergedLinks = Array.from(new Set([...linksHTML, ...linksFB])).slice(0, 250);
 
     return res.status(200).json({
       ok: true,
       url,
-      title: article?.title || pageTitle || "",
-      article,
-      links: links.slice(0, 200).map((href) => ({ href, text: "" })),
-      usedFallback,
+      title: chosen.title || parsedOrig.title || "",
+      article: {
+        title: chosen.title || null,
+        text: chosen.text || null,
+      },
+      links: mergedLinks.map((href) => ({ href, text: "" })),
+      usedFallback: useFallback,
+      lens: { original: lenOrig, fallback: lenFB }
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
 }
-
