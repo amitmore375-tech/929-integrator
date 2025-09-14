@@ -1,149 +1,120 @@
-import { JSDOM } from "jsdom";
-import { Readability } from "@mozilla/readability";
-
-// בניית כתובת רינדור-שרת ל-https דרך r.jina.ai
-function jinaUrl(orig) {
-  const u = new URL(orig);
-  const scheme = u.protocol.replace(":", ""); // 'https' או 'http'
-  return `https://r.jina.ai/${scheme}://${u.host}${u.pathname}${u.search}`;
-}
-
-async function fetchHtml(url) {
-  const ua =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
-  const resp = await fetch(url, {
-    headers: {
-      "user-agent": ua,
-      "accept-language": "he-IL,he;q=0.9,en;q=0.8",
-      "accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    },
-  });
-  if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
-  return await resp.text();
-}
-
-function parseWithReadability(html, baseUrl) {
-  const dom = new JSDOM(html, { url: baseUrl });
-  const doc = dom.window.document;
-  const pageTitle = (doc.querySelector("title")?.textContent || "").trim();
-  let title = pageTitle || null;
-  let text = (doc.body?.textContent || "").trim();
-
-  try {
-    const reader = new Readability(doc);
-    const parsed = reader.parse();
-    if (parsed) {
-      title = parsed.title || title;
-      if (parsed.textContent && parsed.textContent.trim()) {
-        text = parsed.textContent.trim();
-      }
-    }
-  } catch {}
-  return { title, text, doc };
-}
-
-function linksFromHTML(doc, baseUrl, allow) {
-  const set = new Set();
-  for (const a of doc.querySelectorAll("a[href]")) {
-    try {
-      const href = new URL(a.getAttribute("href"), baseUrl).toString();
-      if (allow.some((r) => r.test(href))) set.add(href);
-    } catch {}
-  }
-  return Array.from(set);
-}
-
-function linksFromText(text, allow) {
-  const set = new Set();
-  const re = /https?:\/\/[^\s)\]]+/g;
-  for (const m of text.matchAll(re)) {
-    const href = m[0];
-    try {
-      const norm = new URL(href).toString();
-      if (allow.some((r) => r.test(norm))) set.add(norm);
-    } catch {}
-  }
-  return Array.from(set);
-}
+import { chromium } from 'playwright';
+import { JSDOM } from 'jsdom';
+import { Readability } from '@mozilla/readability';
 
 export default async function handler(req, res) {
   try {
-    // ---- אימות: כותרת x-api-token או query ?token= ----
-    const expected = process.env.INTEGRATOR_TOKEN || process.env.TOKEN;
-    const provided = req.headers["x-api-token"] || req.query.token;
+    // --- Auth ---
+    const expected = process.env.TOKEN;
+    const provided = req.headers['x-api-token'] || req.query.token;
     if (!expected || !provided || provided !== expected) {
-      return res
-        .status(401)
-        .json({ ok: false, error: "unauthorized: missing/invalid token" });
+      return res.status(401).json({ ok: false, error: 'unauthorized: missing/invalid token' });
     }
 
     const url = req.query.url;
-    if (!url) return res.status(400).json({ ok: false, error: "missing url" });
+    const debug = req.query.debug === '1' || req.query.debug === 'true';
 
-    // מרשים רק דומיינים של 929
-    const allow = [
-      /^https?:\/\/(www\.)?929\.org\.il\//,
-      /^https?:\/\/(edu\.)?929\.org\.il\//,
-    ];
-    if (!allow.some((r) => r.test(url))) {
-      return res.status(400).json({ ok: false, error: "url not allowed", url });
+    if (!url) return res.status(400).json({ ok: false, error: 'missing url' });
+
+    // נאפשר רק דפי 929 (ה־URL הראשי)
+    const allow = [/^https?:\/\/(www\.)?929\.org\.il\/page\/\d+/i, /^https?:\/\/(edu\.)?929\.org\.il\//i];
+    if (!allow.some(r => r.test(url))) {
+      return res.status(400).json({ ok: false, error: 'url not allowed', url });
     }
 
-    // --- נביא גם מקור וגם פולבק, ונבחר את העשיר יותר ---
-    let htmlOriginal = "";
-    let htmlFallbackWrapped = "";
-    let fallbackText = "";
-    let fallbackOk = false;
+    const browser = await chromium.launch({
+      args: ['--no-sandbox','--disable-setuid-sandbox'],
+      headless: true
+    });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1600 } });
 
-    // 1) מקור
-    try { htmlOriginal = await fetchHtml(url); } catch (e) { htmlOriginal = ""; }
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
 
-    // 2) פולבק (רינדור-שרת)
-    try {
-      const jr = await fetch(jinaUrl(url));
-      if (jr.ok) {
-        fallbackText = await jr.text(); // טקסט/מרק-דאון
-        const safe = fallbackText
-          .replaceAll("&", "&amp;")
-          .replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;");
-        htmlFallbackWrapped = `<article>${safe}</article>`;
-        fallbackOk = true;
+    // גלילה הדרגתית כדי לטעון lazy content / כרטיסיות
+    await page.evaluate(async () => {
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      let last = 0;
+      for (let i = 0; i < 8; i++) {
+        window.scrollTo(0, document.body.scrollHeight);
+        await sleep(500);
+        const now = document.body.scrollHeight;
+        if (now === last) break;
+        last = now;
       }
-    } catch {}
+      window.scrollTo(0, 0);
+    });
 
-    // פרסינג לשני המקורות
-    const parsedOrig = parseWithReadability(htmlOriginal, url);
-    const parsedFB = htmlFallbackWrapped
-      ? parseWithReadability(htmlFallbackWrapped, url)
-      : { title: null, text: "" , doc: new JSDOM("<div/>").window.document };
+    // תוכן מלא של העמוד
+    const html = await page.content();
+    const dom = new JSDOM(html, { url });
+    const doc = dom.window.document;
 
-    const lenOrig = (parsedOrig.text || "").length;
-    const lenFB   = (parsedFB.text  || "").length;
+    // כותרת + תוכן הקריא של הדף עצמו (הפרק)
+    const title = (doc.querySelector('title')?.textContent || '').trim();
+    const reader = new Readability(doc);
+    const articleParsed = reader.parse();
+    const articleText = (articleParsed?.textContent || '').trim();
 
-    // בוחרים את העשיר יותר
-    const useFallback = fallbackOk && lenFB > Math.max(lenOrig, 250);
-    const chosen = useFallback ? parsedFB : parsedOrig;
+    // איסוף כל העוגנים (קישורים) + טקסט
+    const rawAnchors = await page.$$eval('a', as =>
+      as
+        .map(a => ({
+          href: a.href || '',
+          text: (a.innerText || a.textContent || '').replace(/\s+/g, ' ').trim()
+        }))
+        .filter(x => x.href)
+    );
 
-    // קישורים
-    const linksHTML = linksFromHTML(useFallback ? parsedFB.doc : parsedOrig.doc, url, allow);
-    const linksFB   = useFallback ? linksFromText(fallbackText, allow) : [];
-    const mergedLinks = Array.from(new Set([...linksHTML, ...linksFB])).slice(0, 250);
+    // ניקוי כפולים
+    const uniq = (arr, key) => {
+      const seen = new Set();
+      return arr.filter(x => !seen.has(x[key]) && seen.add(x[key]));
+    };
+    const anchors = uniq(rawAnchors, 'href');
 
-    return res.status(200).json({
+    // סיווגים בסיסיים לפי טקסט/דומיין
+    const isYouTube = (h) => /youtube\.com|youtu\.be/i.test(h);
+    const is929 = (h) => /\/\/(www\.)?929\.org\.il/i.test(h);
+    const byText = (t, ...words) => words.some(w => t.includes(w));
+
+    const youtube = anchors.filter(a => isYouTube(a.href));
+    const chofrim = anchors.filter(a =>
+      byText(a.text, 'חופרים', 'חפרנו', 'ארכיאולוג', 'מחקר') || /chofr|dig|archae/i.test(a.href)
+    );
+    const shimanu = anchors.filter(a =>
+      byText(a.text, 'תשמעו', 'האזנה', 'פודקאסט', 'האזרו') || /soundcloud|spotify|podcast/i.test(a.href)
+    );
+    const simanim = anchors.filter(a => byText(a.text, 'סימנים'));
+    const articles = anchors.filter(a =>
+      (is929(a.href) && /article|post|story|blog|page\/\d+\/\d+/i.test(a.href))
+      || byText(a.text, 'מאמר', 'כתבה', 'טור', 'מחשבה', 'לקריאה')
+    );
+
+    // נשמור גם את כלל הקישורים הפנימיים של 929 לשימוש העוזר
+    const internal929 = anchors.filter(a => is929(a.href));
+
+    await browser.close();
+
+    return res.json({
       ok: true,
       url,
-      title: chosen.title || parsedOrig.title || "",
+      title,
       article: {
-        title: chosen.title || null,
-        text: chosen.text || null,
+        title,
+        text: articleText
       },
-      links: mergedLinks.map((href) => ({ href, text: "" })),
-      usedFallback: useFallback,
-      lens: { original: lenOrig, fallback: lenFB }
+      links: {
+        youtube,
+        chofrim,
+        shimanu,
+        simanim,
+        articles,
+        internal929
+      },
+      debug: debug ? { rawAnchors: anchors.slice(0, 500) } : undefined,
+      fetchedAt: new Date().toISOString()
     });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err) });
   }
 }
